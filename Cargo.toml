@@ -1,0 +1,12 @@
+[package]
+name = "count_instructions"
+version = "0.1.0"
+edition = "2021"
+authors = ["Cesar Eduardo Barros <cesarb@cesarb.eti.br>"]
+description = "Counts the instructions executed within a single function"
+repository = "https://github.com/cesarb/count_instructions"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+libc = "0.2"
+rustix = { version = "0.37.0", features = ["process", "thread"] }
