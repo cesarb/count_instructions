@@ -2,6 +2,8 @@
 
 use libc::*;
 
+use super::Address;
+
 pub const STATE_INIT: c_ulong = 0;
 pub const STATE_READY: c_ulong = 1;
 pub const STATE_COUNT: c_ulong = 2;
@@ -191,7 +193,7 @@ unsafe fn write_control(control_fd: c_int) -> Result<(), c_int> {
     )
 }
 
-unsafe fn write_data(data_fd: c_int, address: c_ulong) -> Result<(), c_int> {
+unsafe fn write_data(data_fd: c_int, address: Address) -> Result<(), c_int> {
     let buf = address.to_ne_bytes();
     let len = buf.len();
     retry_pipe_on_intr(

@@ -9,4 +9,6 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 libc = "0.2"
+
+[target.'cfg(unix)'.dependencies]
 rustix = { version = "0.37.0", features = ["process", "thread"] }
