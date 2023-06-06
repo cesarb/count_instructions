@@ -107,6 +107,17 @@ unsafe fn ptrace_sigtrap_addr(pid: pid_t, status: c_int) -> Result<Option<c_ulon
     Ok(None)
 }
 
+unsafe fn ptrace_syscall_stop_type(pid: pid_t) -> Result<u8, c_int> {
+    let mut info: ptrace_syscall_info = core::mem::zeroed();
+    sys_ptrace(
+        PTRACE_GET_SYSCALL_INFO,
+        pid,
+        core::mem::size_of_val(&info) as c_ulong,
+        &mut info as *mut _ as c_ulong,
+    )?;
+    Ok(info.op)
+}
+
 #[allow(clippy::if_same_then_else)]
 unsafe fn ptrace_restart(request: c_uint, pid: pid_t, status: c_int) -> Result<c_long, c_int> {
     let sig = WSTOPSIG(status);
@@ -115,6 +126,13 @@ unsafe fn ptrace_restart(request: c_uint, pid: pid_t, status: c_int) -> Result<c
         sys_ptrace(request, pid, 0, 0)
     } else if sig == SIGTRAP | 0x80 {
         // syscall-stop
+        let request = if request == PTRACE_DETACH {
+            PTRACE_DETACH
+        } else if ptrace_syscall_stop_type(pid)? != PTRACE_SYSCALL_INFO_EXIT {
+            PTRACE_SYSCALL
+        } else {
+            request
+        };
         sys_ptrace(request, pid, 0, 0)
     } else if sig == SIGTRAP && status >> 16 != 0 {
         // ptrace-event-stop
