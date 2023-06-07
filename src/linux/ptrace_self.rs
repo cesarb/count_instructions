@@ -118,37 +118,47 @@ unsafe fn ptrace_syscall_stop_type(pid: pid_t) -> Result<u8, c_int> {
     Ok(info.op)
 }
 
-#[allow(clippy::if_same_then_else)]
 unsafe fn ptrace_restart(request: c_uint, pid: pid_t, status: c_int) -> Result<c_long, c_int> {
-    let sig = WSTOPSIG(status);
-    if status == 0 {
-        // single-step SIGTRAP
-        sys_ptrace(request, pid, 0, 0)
-    } else if sig == SIGTRAP | 0x80 {
-        // syscall-stop
-        let request = if request == PTRACE_DETACH {
-            PTRACE_DETACH
-        } else if ptrace_syscall_stop_type(pid)? != PTRACE_SYSCALL_INFO_EXIT {
-            PTRACE_SYSCALL
-        } else {
-            request
-        };
-        sys_ptrace(request, pid, 0, 0)
-    } else if sig == SIGTRAP && status >> 16 != 0 {
-        // ptrace-event-stop
-        sys_ptrace(request, pid, 0, 0)
-    } else if status >> 16 == PTRACE_EVENT_STOP {
-        // group-stop
-        let request = if request == PTRACE_DETACH {
-            PTRACE_DETACH
-        } else {
-            PTRACE_LISTEN
-        };
-        sys_ptrace(request, pid, 0, 0)
-    } else {
-        // signal-delivery-stop
-        sys_ptrace(request, pid, 0, sig as c_ulong)
+    #[derive(PartialEq, Eq)]
+    enum StopKind {
+        SingleStep,
+        SystemCall,
+        Event,
+        Group,
+        SignalDelivery,
     }
+
+    let sig = WSTOPSIG(status);
+    let kind = if status == 0 {
+        StopKind::SingleStep
+    } else if sig == SIGTRAP | 0x80 {
+        StopKind::SystemCall
+    } else if sig == SIGTRAP && status >> 16 != 0 {
+        StopKind::Event
+    } else if status >> 16 == PTRACE_EVENT_STOP {
+        StopKind::Group
+    } else {
+        StopKind::SignalDelivery
+    };
+
+    let request = if request == PTRACE_DETACH {
+        PTRACE_DETACH
+    } else {
+        match kind {
+            StopKind::SystemCall if ptrace_syscall_stop_type(pid)? != PTRACE_SYSCALL_INFO_EXIT => {
+                PTRACE_SYSCALL
+            }
+            StopKind::Group => PTRACE_LISTEN,
+            _ => request,
+        }
+    };
+    let sig = if kind == StopKind::SignalDelivery {
+        sig as c_ulong
+    } else {
+        0
+    };
+
+    sys_ptrace(request, pid, 0, sig)
 }
 
 unsafe fn wait_for_stop(pid: pid_t) -> Result<c_int, c_int> {
