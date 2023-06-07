@@ -30,20 +30,26 @@ where
     let mut guard = TRACE_MUTEX.lock().unwrap();
     let token = &mut *guard;
 
+    let mut state = pin!(STATE_INIT);
+    let state_addr = state.as_ref().get_ref() as *const _ as libc::c_ulong;
+    let mut write_state = |data| unsafe {
+        // SAFETY: the result of casting a reference to a pointer is valid and properly aligned.
+        // SAFETY: the tracer will only read this value while this thread is in a stopped state.
+        write_volatile(state.as_mut().get_mut(), data);
+    };
+
     thread::scope(|s| {
         let tid = gettid().as_raw_nonzero().get() as libc::pid_t;
         let (control_read, control_write) = pipe_with(PipeFlags::CLOEXEC)?;
         let (data_read, data_write) = pipe_with(PipeFlags::CLOEXEC)?;
         let (ready_read, ready_write) = pipe_with(PipeFlags::CLOEXEC)?;
-        let mut state = pin!(STATE_INIT);
-        let state_addr = state.as_ref().get_ref() as *const _ as libc::c_ulong;
 
         let child_close_fds = [
             control_read.as_raw_fd(),
             data_read.as_raw_fd(),
             ready_write.as_raw_fd(),
         ];
-        let tracer = thread::Builder::new().spawn_scoped(s, move || {
+        let helper = thread::Builder::new().spawn_scoped(s, move || {
             struct PidGuard(Pid);
 
             impl PidGuard {
@@ -79,8 +85,9 @@ where
                         for fd in child_close_fds {
                             libc::close(fd);
                         }
-                        // SAFETY: due to the single-step, the state variable will stop being read
-                        // before it gets out of scope.
+                        // SAFETY: the state variable outlives the thread scope, and the helper
+                        // thread within that scope always waits for this child process to exit.
+                        // SAFETY: the tracer will only read it while the thread is in a stopped state.
                         libc::_exit(
                             match trace(
                                 tid,
@@ -135,30 +142,15 @@ where
             }
         })?;
 
-        // SAFETY: the result of casting a reference to a pointer is valid and properly aligned.
-        // SAFETY: the tracer will only read this value while this thread is in a stopped state.
-        unsafe {
-            write_volatile(state.as_mut().get_mut(), STATE_READY);
-        }
+        write_state(STATE_READY);
 
-        // Wait here until the tracer is ready.
         retry_on_intr(|| read(&control_read, &mut [0]))?;
 
-        // SAFETY: the result of casting a reference to a pointer is valid and properly aligned.
-        // SAFETY: the tracer will only read this value while this thread is in a stopped state.
-        unsafe {
-            write_volatile(state.as_mut().get_mut(), STATE_COUNT);
-        }
-
+        write_state(STATE_COUNT);
         let result = f();
+        write_state(STATE_STOP);
 
-        // SAFETY: the result of casting a reference to a pointer is valid and properly aligned.
-        // SAFETY: the tracer will only read this value while this thread is in a stopped state.
-        unsafe {
-            write_volatile(state.as_mut().get_mut(), STATE_STOP);
-        }
-
-        match tracer.join() {
+        match helper.join() {
             Ok(Ok(())) => Ok(result),
             Ok(Err(err)) => Err(err),
             Err(e) => panic::resume_unwind(e),
