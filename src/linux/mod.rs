@@ -2,6 +2,7 @@ use std::sync::Mutex;
 use std::{panic, thread};
 
 use core::cmp::Ordering;
+use core::hint::black_box;
 use core::mem::{forget, size_of};
 use core::num::NonZeroU32;
 use core::pin::pin;
@@ -142,13 +143,16 @@ where
             }
         })?;
 
-        write_state(STATE_READY);
+        let f = black_box(f);
 
+        write_state(STATE_READY);
         retry_on_intr(|| read(&control_read, &mut [0]))?;
 
         write_state(STATE_COUNT);
         let result = f();
         write_state(STATE_STOP);
+
+        let result = black_box(result);
 
         match helper.join() {
             Ok(Ok(())) => Ok(result),
