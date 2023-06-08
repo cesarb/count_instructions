@@ -63,16 +63,9 @@ jobs:
           rustup target add $TARGET
           cargo build --verbose --target $TARGET
           cargo build --verbose --release --target $TARGET
-      - name: Cross-compile riscv32imac-unknown-none-elf
+      - name: Cross-compile wasm32-wasi
         env:
-          TARGET: riscv32imac-unknown-none-elf
-        run: |
-          rustup target add $TARGET
-          cargo build --verbose --target $TARGET
-          cargo build --verbose --release --target $TARGET
-      - name: Cross-compile wasm32-unknown-unknown
-        env:
-          TARGET: wasm32-unknown-unknown
+          TARGET: wasm32-wasi
         run: |
           rustup target add $TARGET
           cargo build --verbose --target $TARGET
