@@ -46,6 +46,9 @@ pub unsafe fn trace(
     sys_ptrace(PTRACE_SEIZE, pid, 0, PTRACE_O_TRACESYSGOOD as c_ulong)?;
     sys_ptrace(PTRACE_INTERRUPT, pid, 0, 0)?;
 
+    // Tell the helper thread that the target thread has been attached.
+    write_data(data_fd, 0)?;
+
     let mut status = wait_for_stop(pid)?;
 
     // Fast skip until ready.

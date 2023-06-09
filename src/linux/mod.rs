@@ -28,9 +28,6 @@ where
     F: FnOnce() -> T,
     C: FnMut(&Instruction) + Send,
 {
-    let mut guard = TRACE_MUTEX.lock().unwrap();
-    let token = &mut *guard;
-
     let mut state = pin!(STATE_INIT);
     let state_addr = state.as_ref().get_ref() as *const _ as libc::c_ulong;
     let mut write_state = |data| unsafe {
@@ -51,6 +48,8 @@ where
             ready_write.as_raw_fd(),
         ];
         let helper = thread::Builder::new().spawn_scoped(s, move || {
+            let mut guard = TRACE_MUTEX.lock().unwrap();
+
             struct PidGuard(Pid);
 
             impl PidGuard {
@@ -96,7 +95,7 @@ where
                                 control_write.as_raw_fd(),
                                 data_write.as_raw_fd(),
                                 ready_read.as_raw_fd(),
-                                token,
+                                &mut guard,
                             ) {
                                 Ok(_) => libc::EXIT_SUCCESS,
                                 Err(_) => libc::EXIT_FAILURE,
@@ -115,12 +114,18 @@ where
             drop(data_write);
             drop(ready_read);
 
+            // Necessary when "restricted ptrace" mode is enabled.
             set_ptracer(PTracer::ProcessID(pid.get()))?;
             retry_on_intr(|| write(&ready_write, &[0]))?;
             drop(ready_write);
 
+            // Wait for child PTRACE_SEIZE call before releasing the mutex.
+            let mut buf = [0; size_of::<Address>()];
+            let size = retry_on_intr(|| read(&data_read, &mut buf))?;
+            drop(guard);
+            assert_eq!(size, buf.len());
+
             loop {
-                let mut buf = [0; size_of::<Address>()];
                 let size = retry_on_intr(|| read(&data_read, &mut buf))?;
                 if size == 0 {
                     break;
