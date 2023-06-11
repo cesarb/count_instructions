@@ -148,16 +148,14 @@ where
             }
         })?;
 
-        let f = black_box(f);
-
         write_state(STATE_READY);
         retry_on_intr(|| read(&control_read, &mut [0]))?;
 
         write_state(STATE_COUNT);
+        let f = black_box(f);
         let result = f();
-        write_state(STATE_STOP);
-
         let result = black_box(result);
+        write_state(STATE_STOP);
 
         match helper.join() {
             Ok(Ok(())) => Ok(result),
