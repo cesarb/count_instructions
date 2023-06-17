@@ -100,7 +100,7 @@ extern crate std;
 mod linux;
 
 /// Represents the address of a machine instruction.
-pub type Address = libc::c_ulong;
+pub type Address = usize;
 
 /// Information about an instruction executed by the function being traced.
 #[derive(Debug)]
@@ -110,12 +110,14 @@ pub struct Instruction {
 
 impl Instruction {
     #[inline]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn new(address: Address) -> Self {
         Self { address }
     }
 
     /// The address of the executed instruction.
     #[inline]
+    #[must_use]
     pub fn address(&self) -> Address {
         self.address
     }

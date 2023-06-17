@@ -1,8 +1,7 @@
 // Code in this file should be treated as #![no_std]; it should only use core and libc.
 
-use libc::*;
-
 use super::Address;
+use libc::*;
 
 pub const STATE_INIT: c_ulong = 0;
 pub const STATE_READY: c_ulong = 1;
@@ -98,12 +97,12 @@ unsafe fn ptrace_peek(pid: pid_t, addr: c_ulong) -> Result<c_ulong, c_int> {
     Ok(data)
 }
 
-unsafe fn ptrace_sigtrap_addr(pid: pid_t, status: c_int) -> Result<Option<c_ulong>, c_int> {
+unsafe fn ptrace_sigtrap_addr(pid: pid_t, status: c_int) -> Result<Option<usize>, c_int> {
     if WSTOPSIG(status) == SIGTRAP && status >> 16 == 0 {
         let mut siginfo: siginfo_t = core::mem::zeroed();
         sys_ptrace(PTRACE_GETSIGINFO, pid, 0, &mut siginfo as *mut _ as c_ulong)?;
         if siginfo.si_code > 0 {
-            return Ok(Some(siginfo.si_addr() as c_ulong));
+            return Ok(Some(siginfo.si_addr() as usize));
         }
     }
 
