@@ -4,12 +4,12 @@ use std::{panic, thread};
 use core::cmp::Ordering;
 use core::hint::black_box;
 use core::mem::{forget, size_of};
-use core::num::NonZeroU32;
 use core::pin::pin;
 use core::ptr::write_volatile;
 
 use rustix::fd::AsRawFd;
-use rustix::io::{pipe_with, read, retry_on_intr, write, PipeFlags};
+use rustix::io::{read, retry_on_intr, write};
+use rustix::pipe::{pipe_with, PipeFlags};
 use rustix::process::{
     kill_process, set_ptracer, waitid, PTracer, Pid, Signal, WaitId, WaitidOptions, WaitidStatus,
 };
@@ -104,7 +104,7 @@ where
                     }
                     Ordering::Greater => {
                         // SAFETY: pid is > 0
-                        PidGuard(Pid::from_raw_nonzero(NonZeroU32::new_unchecked(pid as u32)))
+                        PidGuard(Pid::from_raw_unchecked(pid))
                     }
                     Ordering::Less => return Err(std::io::Error::last_os_error()),
                 }
