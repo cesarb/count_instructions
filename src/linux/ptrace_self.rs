@@ -48,45 +48,42 @@ pub unsafe fn trace(
     // Tell the helper thread that the target thread has been attached.
     write_data(data_fd, 0)?;
 
-    let mut status = wait_for_stop(pid)?;
+    let mut stop = StopState::Running;
+    wait_for_stop(pid, &mut stop)?;
 
     // Fast skip until ready.
     while ptrace_peek(pid, state_addr)? < STATE_READY {
-        ptrace_restart(PTRACE_SYSCALL, pid, status)?;
-        status = wait_for_stop(pid)?;
+        ptrace_restart(PTRACE_SYSCALL, pid, &stop)?;
+        wait_for_stop(pid, &mut stop)?;
     }
 
     // The thread is stopped at or before the read of the pipe, allow it past that point.
     write_control(control_fd)?;
     close(control_fd);
 
-    // Wait for syscall-stop (read of control pipe).
-    while WSTOPSIG(status) != SIGTRAP | 0x80 {
-        ptrace_restart(PTRACE_SYSCALL, pid, status)?;
-        status = wait_for_stop(pid)?;
+    // Skip over read of control pipe.
+    while stop != StopState::SyscallExit {
+        ptrace_restart(PTRACE_SYSCALL, pid, &stop)?;
+        wait_for_stop(pid, &mut stop)?;
     }
 
     // Single step until start of counted region.
     while ptrace_peek(pid, state_addr)? < STATE_COUNT {
-        ptrace_restart(PTRACE_SINGLESTEP, pid, status)?;
-        status = wait_for_stop(pid)?;
-        if ptrace_sigtrap_addr(pid, status)?.is_some() {
-            status = 0;
-        }
+        ptrace_restart(PTRACE_SINGLESTEP, pid, &stop)?;
+        wait_for_stop(pid, &mut stop)?;
     }
 
     // Single step until end of counted region.
     while ptrace_peek(pid, state_addr)? < STATE_STOP {
-        ptrace_restart(PTRACE_SINGLESTEP, pid, status)?;
-        status = wait_for_stop(pid)?;
-        if let Some(addr) = ptrace_sigtrap_addr(pid, status)? {
-            status = 0;
+        ptrace_restart(PTRACE_SINGLESTEP, pid, &stop)?;
+        if let StopState::SingleStep(addr) = stop {
             write_data(data_fd, addr)?;
         }
+        wait_for_stop(pid, &mut stop)?;
     }
 
     // Release the thread.
-    ptrace_restart(PTRACE_DETACH, pid, status)?;
+    ptrace_restart(PTRACE_DETACH, pid, &stop)?;
 
     Ok(())
 }
@@ -97,73 +94,69 @@ unsafe fn ptrace_peek(pid: pid_t, addr: c_ulong) -> Result<c_ulong, c_int> {
     Ok(data)
 }
 
-unsafe fn ptrace_sigtrap_addr(pid: pid_t, status: c_int) -> Result<Option<usize>, c_int> {
-    if WSTOPSIG(status) == SIGTRAP && status >> 16 == 0 {
-        let mut siginfo: siginfo_t = core::mem::zeroed();
-        sys_ptrace(PTRACE_GETSIGINFO, pid, 0, &mut siginfo as *mut _ as c_ulong)?;
-        if siginfo.si_code > 0 {
-            return Ok(Some(siginfo.si_addr() as usize));
-        }
-    }
-
-    Ok(None)
-}
-
-unsafe fn ptrace_syscall_stop_type(pid: pid_t) -> Result<u8, c_int> {
-    let mut info: ptrace_syscall_info = core::mem::zeroed();
-    sys_ptrace(
-        PTRACE_GET_SYSCALL_INFO,
-        pid,
-        core::mem::size_of_val(&info) as c_ulong,
-        &mut info as *mut _ as c_ulong,
-    )?;
-    Ok(info.op)
-}
-
-unsafe fn ptrace_restart(request: c_uint, pid: pid_t, status: c_int) -> Result<c_long, c_int> {
-    #[derive(PartialEq, Eq)]
-    enum StopKind {
-        SingleStep,
-        SystemCall,
-        Event,
-        Group,
-        SignalDelivery,
-    }
-
-    let sig = WSTOPSIG(status);
-    let kind = if status == 0 {
-        StopKind::SingleStep
-    } else if sig == SIGTRAP | 0x80 {
-        StopKind::SystemCall
-    } else if sig == SIGTRAP && status >> 16 != 0 {
-        StopKind::Event
-    } else if status >> 16 == PTRACE_EVENT_STOP {
-        StopKind::Group
-    } else {
-        StopKind::SignalDelivery
-    };
-
+unsafe fn ptrace_restart(request: c_uint, pid: pid_t, stop: &StopState) -> Result<(), c_int> {
     let request = if request == PTRACE_DETACH {
         PTRACE_DETACH
     } else {
-        match kind {
-            StopKind::SystemCall if ptrace_syscall_stop_type(pid)? != PTRACE_SYSCALL_INFO_EXIT => {
-                PTRACE_SYSCALL
-            }
-            StopKind::Group => PTRACE_LISTEN,
+        match stop {
+            StopState::SyscallEnter => PTRACE_SYSCALL,
+            StopState::Group => PTRACE_LISTEN,
             _ => request,
         }
     };
-    let sig = if kind == StopKind::SignalDelivery {
+
+    let sig = if let StopState::Signal(sig) = *stop {
         sig as c_ulong
     } else {
         0
     };
 
-    sys_ptrace(request, pid, 0, sig)
+    sys_ptrace(request, pid, 0, sig)?;
+    Ok(())
 }
 
-unsafe fn wait_for_stop(pid: pid_t) -> Result<c_int, c_int> {
+#[derive(PartialEq, Eq, Debug)]
+enum StopState {
+    SyscallEnter,
+    SyscallExit,
+    Event,
+    Group,
+    Signal(c_int),
+    SingleStep(usize),
+    Running,
+}
+
+impl StopState {
+    unsafe fn update(&mut self, status: c_int, pid: pid_t) -> Result<(), c_int> {
+        let sig = WSTOPSIG(status);
+        *self = if sig == SIGTRAP | 0x80 {
+            if *self == StopState::SyscallEnter {
+                StopState::SyscallExit
+            } else {
+                StopState::SyscallEnter
+            }
+        } else if sig == SIGTRAP {
+            if status >> 16 != 0 {
+                StopState::Event
+            } else {
+                let mut siginfo: siginfo_t = core::mem::zeroed();
+                sys_ptrace(PTRACE_GETSIGINFO, pid, 0, &mut siginfo as *mut _ as c_ulong)?;
+                if siginfo.si_code > 0 {
+                    StopState::SingleStep(siginfo.si_addr() as usize)
+                } else {
+                    StopState::Signal(sig)
+                }
+            }
+        } else if status >> 16 == PTRACE_EVENT_STOP {
+            StopState::Group
+        } else {
+            StopState::Signal(sig)
+        };
+        Ok(())
+    }
+}
+
+unsafe fn wait_for_stop(pid: pid_t, stop: &mut StopState) -> Result<(), c_int> {
     let mut status = 0;
     loop {
         let ret = waitpid(pid, &mut status, __WALL);
@@ -180,7 +173,8 @@ unsafe fn wait_for_stop(pid: pid_t) -> Result<c_int, c_int> {
     }
 
     if WIFSTOPPED(status) {
-        Ok(status)
+        stop.update(status, pid)?;
+        Ok(())
     } else {
         Err(ECHILD)
     }
