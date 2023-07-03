@@ -1,6 +1,6 @@
 [package]
 name = "count_instructions"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 authors = ["Cesar Eduardo Barros <cesarb@cesarb.eti.br>"]
 description = "Counts the instructions executed within a single function"
