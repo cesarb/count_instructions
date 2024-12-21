@@ -63,9 +63,9 @@ jobs:
           rustup target add $TARGET
           cargo build --verbose --target $TARGET
           cargo build --verbose --release --target $TARGET
-      - name: Cross-compile wasm32-wasi
+      - name: Cross-compile wasm32-wasip1
         env:
-          TARGET: wasm32-wasi
+          TARGET: wasm32-wasip1
         run: |
           rustup target add $TARGET
           cargo build --verbose --target $TARGET
