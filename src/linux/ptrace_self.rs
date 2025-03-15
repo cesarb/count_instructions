@@ -22,11 +22,7 @@ unsafe fn sys_ptrace(
     data: c_ulong,
 ) -> Result<c_long, c_int> {
     let ret = syscall(SYS_ptrace, request as c_long, pid as c_long, addr, data);
-    if ret < 0 {
-        Err(errno())
-    } else {
-        Ok(ret)
-    }
+    if ret < 0 { Err(errno()) } else { Ok(ret) }
 }
 
 // SAFETY: this runs in a forked child of a multithreaded program, so only

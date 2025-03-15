@@ -1,3 +1,5 @@
+#![allow(unsafe_op_in_unsafe_fn)]
+
 use std::sync::Mutex;
 use std::{panic, thread};
 
@@ -9,9 +11,9 @@ use core::ptr::write_volatile;
 
 use rustix::fd::AsRawFd;
 use rustix::io::{read, retry_on_intr, write};
-use rustix::pipe::{pipe_with, PipeFlags};
+use rustix::pipe::{PipeFlags, pipe_with};
 use rustix::process::{
-    kill_process, set_ptracer, waitid, PTracer, Pid, Signal, WaitId, WaitidOptions, WaitidStatus,
+    PTracer, Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus, kill_process, set_ptracer, waitid,
 };
 use rustix::thread::gettid;
 
@@ -19,7 +21,7 @@ use super::{Address, Instruction};
 
 mod ptrace_self;
 
-use ptrace_self::{trace, TraceToken, STATE_COUNT, STATE_INIT, STATE_READY, STATE_STOP};
+use ptrace_self::{STATE_COUNT, STATE_INIT, STATE_READY, STATE_STOP, TraceToken, trace};
 
 static TRACE_MUTEX: Mutex<TraceToken> = Mutex::new(TraceToken);
 
@@ -58,8 +60,8 @@ where
                     self.0
                 }
 
-                fn wait(self) -> rustix::io::Result<WaitidStatus> {
-                    let result = waitid(WaitId::Pid(self.0), WaitidOptions::EXITED);
+                fn wait(self) -> rustix::io::Result<WaitIdStatus> {
+                    let result = waitid(WaitId::Pid(self.0), WaitIdOptions::EXITED);
                     forget(self);
                     Ok(result?.unwrap())
                 }
@@ -67,8 +69,8 @@ where
 
             impl Drop for PidGuard {
                 fn drop(&mut self) {
-                    let _ = kill_process(self.0, Signal::Kill);
-                    let _ = waitid(WaitId::Pid(self.0), WaitidOptions::EXITED);
+                    let _ = kill_process(self.0, Signal::KILL);
+                    let _ = waitid(WaitId::Pid(self.0), WaitIdOptions::EXITED);
                 }
             }
 

@@ -1,14 +1,13 @@
 [package]
 name = "count_instructions"
 version = "0.1.4"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85.0"
 authors = ["Cesar Eduardo Barros <cesarb@cesarb.eti.br>"]
 description = "Counts the instructions executed within a single function"
 repository = "https://github.com/cesarb/count_instructions"
 license = "MIT OR Apache-2.0"
 
-[dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
-
-[target.'cfg(unix)'.dependencies]
-rustix = { version = "0.38.0", features = ["pipe", "process", "thread"] }
+rustix = { version = "1.0.0", features = ["pipe", "process", "thread"] }
