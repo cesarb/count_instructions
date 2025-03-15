@@ -7,7 +7,7 @@ use core::cmp::Ordering;
 use core::hint::black_box;
 use core::mem::{forget, size_of};
 use core::pin::pin;
-use core::ptr::write_volatile;
+use core::ptr::{from_ref, write_volatile};
 
 use rustix::fd::AsRawFd;
 use rustix::io::{read, retry_on_intr, write};
@@ -31,7 +31,7 @@ where
     C: FnMut(&Instruction) + Send,
 {
     let mut state = pin!(STATE_INIT);
-    let state_addr = state.as_ref().get_ref() as *const _ as libc::c_ulong;
+    let state_addr = from_ref(state.as_ref().get_ref()) as libc::c_ulong;
     let mut write_state = |data| unsafe {
         // SAFETY: the result of casting a reference to a pointer is valid and properly aligned.
         // SAFETY: the tracer will only read this value while this thread is in a stopped state.
@@ -51,28 +51,6 @@ where
         ];
         let helper = thread::Builder::new().spawn_scoped(s, move || {
             let mut guard = TRACE_MUTEX.lock().unwrap();
-
-            struct PidGuard(Pid);
-
-            impl PidGuard {
-                #[inline]
-                fn get(&self) -> Pid {
-                    self.0
-                }
-
-                fn wait(self) -> rustix::io::Result<WaitIdStatus> {
-                    let result = waitid(WaitId::Pid(self.0), WaitIdOptions::EXITED);
-                    forget(self);
-                    Ok(result?.unwrap())
-                }
-            }
-
-            impl Drop for PidGuard {
-                fn drop(&mut self) {
-                    let _ = kill_process(self.0, Signal::KILL);
-                    let _ = waitid(WaitId::Pid(self.0), WaitIdOptions::EXITED);
-                }
-            }
 
             assert!(tid > 0);
             let pid = unsafe {
@@ -99,7 +77,7 @@ where
                                 ready_read.as_raw_fd(),
                                 &mut guard,
                             ) {
-                                Ok(_) => libc::EXIT_SUCCESS,
+                                Ok(()) => libc::EXIT_SUCCESS,
                                 Err(_) => libc::EXIT_FAILURE,
                             },
                         );
@@ -165,6 +143,28 @@ where
             Err(e) => panic::resume_unwind(e),
         }
     })
+}
+
+struct PidGuard(Pid);
+
+impl PidGuard {
+    #[inline]
+    fn get(&self) -> Pid {
+        self.0
+    }
+
+    fn wait(self) -> rustix::io::Result<WaitIdStatus> {
+        let result = waitid(WaitId::Pid(self.0), WaitIdOptions::EXITED);
+        forget(self);
+        Ok(result?.unwrap())
+    }
+}
+
+impl Drop for PidGuard {
+    fn drop(&mut self) {
+        let _ = kill_process(self.0, Signal::KILL);
+        let _ = waitid(WaitId::Pid(self.0), WaitIdOptions::EXITED);
+    }
 }
 
 #[cfg(test)]

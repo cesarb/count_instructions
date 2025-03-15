@@ -86,7 +86,7 @@ pub unsafe fn trace(
 
 unsafe fn ptrace_peek(pid: pid_t, addr: c_ulong) -> Result<c_ulong, c_int> {
     let mut data = 0;
-    sys_ptrace(PTRACE_PEEKDATA, pid, addr, &mut data as *mut _ as c_ulong)?;
+    sys_ptrace(PTRACE_PEEKDATA, pid, addr, &raw mut data as c_ulong)?;
     Ok(data)
 }
 
@@ -136,7 +136,7 @@ impl StopState {
                 StopState::Event
             } else {
                 let mut siginfo: siginfo_t = core::mem::zeroed();
-                sys_ptrace(PTRACE_GETSIGINFO, pid, 0, &mut siginfo as *mut _ as c_ulong)?;
+                sys_ptrace(PTRACE_GETSIGINFO, pid, 0, &raw mut siginfo as c_ulong)?;
                 if siginfo.si_code > 0 {
                     StopState::SingleStep(siginfo.si_addr() as usize)
                 } else {
@@ -187,7 +187,7 @@ where
             if err != EINTR {
                 break Err(err);
             }
-        } else if ret == len as ssize_t {
+        } else if ret as usize == len {
             break Ok(());
         } else {
             break Err(EPIPE);
@@ -199,7 +199,7 @@ unsafe fn wait_for_set_ptracer(ready_fd: c_int) -> Result<(), c_int> {
     let mut buf: [u8; 1] = [0];
     let len = buf.len();
     retry_pipe_on_intr(
-        || read(ready_fd, &mut buf as *mut [u8] as *mut c_void, len),
+        || read(ready_fd, (&raw mut buf).cast(), len),
         len,
     )
 }
@@ -208,7 +208,7 @@ unsafe fn write_control(control_fd: c_int) -> Result<(), c_int> {
     let buf: [u8; 1] = [0];
     let len = buf.len();
     retry_pipe_on_intr(
-        || write(control_fd, &buf as *const [u8] as *const c_void, len),
+        || write(control_fd, (&raw const buf).cast(), len),
         len,
     )
 }
@@ -217,7 +217,7 @@ unsafe fn write_data(data_fd: c_int, address: Address) -> Result<(), c_int> {
     let buf = address.to_ne_bytes();
     let len = buf.len();
     retry_pipe_on_intr(
-        || write(data_fd, &buf as *const [u8] as *const c_void, len),
+        || write(data_fd, (&raw const buf).cast(), len),
         len,
     )
 }
