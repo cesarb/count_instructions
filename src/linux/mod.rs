@@ -1,26 +1,26 @@
-#![allow(unsafe_op_in_unsafe_fn)]
-
+use std::os::fd::AsRawFd;
+use std::panic;
 use std::sync::Mutex;
-use std::{panic, thread};
+use std::thread;
 
 use core::cmp::Ordering;
 use core::hint::black_box;
-use core::mem::{forget, size_of};
+use core::mem::{drop, forget, size_of};
 use core::pin::pin;
 use core::ptr::{from_ref, write_volatile};
 
-use rustix::fd::AsRawFd;
 use rustix::io::{read, retry_on_intr, write};
 use rustix::pipe::{PipeFlags, pipe_with};
 use rustix::process::{
     PTracer, Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus, kill_process, set_ptracer, waitid,
 };
-use rustix::thread::gettid;
 
 use super::{Address, Instruction};
 
+mod fd;
 mod ptrace_self;
 
+use fd::RawOwnedFd;
 use ptrace_self::{STATE_COUNT, STATE_INIT, STATE_READY, STATE_STOP, TraceToken, trace};
 
 static TRACE_MUTEX: Mutex<TraceToken> = Mutex::new(TraceToken);
@@ -32,64 +32,81 @@ where
 {
     let mut state = pin!(STATE_INIT);
     let state_addr = from_ref(state.as_ref().get_ref()) as libc::c_ulong;
-    let mut write_state = |data| unsafe {
-        // SAFETY: the result of casting a reference to a pointer is valid and properly aligned.
-        // SAFETY: the tracer will only read this value while this thread is in a stopped state.
-        write_volatile(state.as_mut().get_mut(), data);
-    };
+    // SAFETY: the result of casting a reference to a pointer is valid and properly aligned.
+    // SAFETY: the tracer will only read this value while this thread is in a stopped state.
+    let mut write_state = |data| unsafe { write_volatile(state.as_mut().get_mut(), data) };
+
+    let (control_read, control_write) = pipe_with(PipeFlags::CLOEXEC)?;
+    let (data_read, data_write) = pipe_with(PipeFlags::CLOEXEC)?;
+    let (ready_read, ready_write) = pipe_with(PipeFlags::CLOEXEC)?;
+
+    // These file descriptors will be used from the child of the fork(),
+    // which must use only async-signal-safe functions, but `OwnedFd`
+    // might use functions which are not async-signal-safe.
+    let control_read = RawOwnedFd::from(control_read);
+    let control_write = RawOwnedFd::from(control_write);
+    let data_read = RawOwnedFd::from(data_read);
+    let data_write = RawOwnedFd::from(data_write);
+    let ready_read = RawOwnedFd::from(ready_read);
+    let ready_write = RawOwnedFd::from(ready_write);
+
+    // The read end of the control pipe is referenced by both threads.
+    // Borrow it here, to ensure it can be dropped only after the scope.
+    let control_read = &control_read;
 
     thread::scope(|s| {
-        let tid = gettid().as_raw_nonzero().get() as libc::pid_t;
-        let (control_read, control_write) = pipe_with(PipeFlags::CLOEXEC)?;
-        let (data_read, data_write) = pipe_with(PipeFlags::CLOEXEC)?;
-        let (ready_read, ready_write) = pipe_with(PipeFlags::CLOEXEC)?;
+        // SAFETY: gettid() is safe
+        let traced_tid = unsafe { libc::gettid() };
+        assert!(traced_tid > 0);
 
-        let child_close_fds = [
-            control_read.as_raw_fd(),
-            data_read.as_raw_fd(),
-            ready_write.as_raw_fd(),
-        ];
         let helper = thread::Builder::new().spawn_scoped(s, move || {
             let mut guard = TRACE_MUTEX.lock().unwrap();
 
-            assert!(tid > 0);
-            let pid = unsafe {
-                // SAFETY: the child will only use async-signal-safe functions from libc or raw system calls.
-                let pid = libc::fork();
+            let pid = {
+                // SAFETY: the child will only use async-signal-safe functions from libc
+                // or raw system calls.
+                let pid = unsafe { libc::fork() };
                 match pid.cmp(&0) {
                     Ordering::Equal => {
-                        // SAFETY: this runs in a forked child of a multithreaded program, so only
+                        // This block runs in a forked child of a multithreaded program, so only
                         // async-signal-safe functions from libc or raw system calls can be used here.
-                        // SAFETY: all the pipe fds were inherited before being closed, because they
-                        // are closed after either the fork() call or the join of the forking thread.
-                        for fd in child_close_fds {
-                            libc::close(fd);
-                        }
+
+                        // Close the unused end of the pipes.
+                        // SAFETY: `control_read` will only be closed in the parent process
+                        // after the `thread::scope` ends, which means it's still open here.
+                        // SAFETY: nothing else in this child acts on this file descriptor.
+                        let _ = unsafe { libc::close(control_read.as_raw_fd()) };
+                        drop(data_read);
+                        drop(ready_write);
+
                         // SAFETY: the state variable outlives the thread scope, and the helper
                         // thread within that scope always waits for this child process to exit.
                         // SAFETY: the tracer will only read it while the thread is in a stopped state.
-                        libc::_exit(
-                            match trace(
-                                tid,
-                                state_addr,
-                                control_write.as_raw_fd(),
-                                data_write.as_raw_fd(),
-                                ready_read.as_raw_fd(),
-                                &mut guard,
-                            ) {
-                                Ok(()) => libc::EXIT_SUCCESS,
-                                Err(_) => libc::EXIT_FAILURE,
-                            },
-                        );
+                        unsafe {
+                            libc::_exit(
+                                match trace(
+                                    traced_tid,
+                                    state_addr,
+                                    control_write,
+                                    &data_write,
+                                    ready_read,
+                                    &mut guard,
+                                ) {
+                                    Ok(()) => libc::EXIT_SUCCESS,
+                                    Err(_) => libc::EXIT_FAILURE,
+                                },
+                            );
+                        }
                     }
                     Ordering::Greater => {
                         // SAFETY: pid is > 0
-                        PidGuard(Pid::from_raw_unchecked(pid))
+                        PidGuard(unsafe { Pid::from_raw_unchecked(pid) })
                     }
                     Ordering::Less => return Err(std::io::Error::last_os_error()),
                 }
             };
 
+            // Close the unused end of the pipes.
             drop(control_write);
             drop(data_write);
             drop(ready_read);
@@ -129,7 +146,7 @@ where
         })?;
 
         write_state(STATE_READY);
-        retry_on_intr(|| read(&control_read, &mut [0]))?;
+        retry_on_intr(|| read(control_read, &mut [0]))?;
 
         write_state(STATE_COUNT);
         let f = black_box(f);
