@@ -88,7 +88,7 @@ where
                                     traced_tid,
                                     state_addr,
                                     control_write,
-                                    &data_write,
+                                    data_write,
                                     ready_read,
                                     &mut guard,
                                 ) {

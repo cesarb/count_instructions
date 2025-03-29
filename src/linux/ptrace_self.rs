@@ -14,6 +14,46 @@ pub const STATE_STOP: c_ulong = 3;
 
 pub struct TraceToken;
 
+#[derive(Debug)]
+struct RunningTracee {
+    pid: pid_t,
+    in_syscall: bool,
+}
+
+#[derive(Debug)]
+struct StoppedTracee {
+    pid: pid_t,
+    stop: StoppedState,
+}
+
+impl RunningTracee {
+    #[inline]
+    unsafe fn new(pid: pid_t) -> RunningTracee {
+        RunningTracee {
+            pid,
+            in_syscall: false,
+        }
+    }
+
+    #[inline]
+    unsafe fn stopped(self, stop: StoppedState) -> StoppedTracee {
+        StoppedTracee {
+            pid: self.pid,
+            stop,
+        }
+    }
+}
+
+impl StoppedTracee {
+    #[inline]
+    unsafe fn restarted(self) -> RunningTracee {
+        RunningTracee {
+            pid: self.pid,
+            in_syscall: self.stop == StoppedState::SyscallEnter,
+        }
+    }
+}
+
 #[inline]
 fn errno() -> c_int {
     // SAFETY: reading errno is async-signal-safe
@@ -41,7 +81,7 @@ pub unsafe fn trace(
     pid: pid_t,
     state_addr: c_ulong,
     control_fd: RawOwnedFd,
-    data_fd: &RawOwnedFd,
+    data_fd: RawOwnedFd,
     ready_fd: RawOwnedFd,
     _token: &mut TraceToken,
 ) -> Result<(), c_int> {
@@ -60,84 +100,48 @@ pub unsafe fn trace(
     // having died and the thread pid having been reused before the
     // ptrace attach above. In that case, this will return Err(EPIPE)
     // which will lead to this process exiting and implicitly detaching.
-    write_data(data_fd, 0)?;
+    write_data(&data_fd, 0)?;
 
-    let mut stop = StopState::Running;
     // SAFETY: the pid is a thread being traced
-    unsafe {
-        wait_for_stop(pid, &mut stop)?;
-    }
+    let mut tracee = wait_for_stop(unsafe { RunningTracee::new(pid) })?;
 
     // Fast skip until ready.
-    // SAFETY: the pid is a thread being traced, which is in ptrace-stop
     // SAFETY: the address points to the pinned state value
-    while unsafe { ptrace_peek(pid, state_addr)? } < STATE_READY {
-        // SAFETY: the pid is a thread being traced, which is in ptrace-stop
-        unsafe {
-            ptrace_restart(PTRACE_SYSCALL, pid, &stop)?;
-        }
-        // SAFETY: the pid is a thread being traced
-        unsafe {
-            wait_for_stop(pid, &mut stop)?;
-        }
+    while unsafe { ptrace_peek(&tracee, state_addr)? } < STATE_READY {
+        tracee = wait_for_stop(ptrace_restart(tracee, PTRACE_SYSCALL)?)?;
     }
 
     // The thread is stopped at or before the read of the pipe, allow it past that point.
     write_control(control_fd)?;
 
     // Skip over read of control pipe.
-    while stop != StopState::SyscallExit {
-        // SAFETY: the pid is a thread being traced, which is in ptrace-stop
-        unsafe {
-            ptrace_restart(PTRACE_SYSCALL, pid, &stop)?;
-        }
-        // SAFETY: the pid is a thread being traced
-        unsafe {
-            wait_for_stop(pid, &mut stop)?;
-        }
+    while tracee.stop != StoppedState::SyscallExit {
+        tracee = wait_for_stop(ptrace_restart(tracee, PTRACE_SYSCALL)?)?;
     }
 
     // Single step until start of counted region.
-    // SAFETY: the pid is a thread being traced, which is in ptrace-stop
     // SAFETY: the address points to the pinned state value
-    while unsafe { ptrace_peek(pid, state_addr)? } < STATE_COUNT {
-        // SAFETY: the pid is a thread being traced, which is in ptrace-stop
-        unsafe {
-            ptrace_restart(PTRACE_SINGLESTEP, pid, &stop)?;
-        }
-        // SAFETY: the pid is a thread being traced
-        unsafe {
-            wait_for_stop(pid, &mut stop)?;
-        }
+    while unsafe { ptrace_peek(&tracee, state_addr)? } < STATE_COUNT {
+        tracee = wait_for_stop(ptrace_restart(tracee, PTRACE_SINGLESTEP)?)?;
     }
 
     // Single step until end of counted region.
-    // SAFETY: the pid is a thread being traced, which is in ptrace-stop
     // SAFETY: the address points to the pinned state value
-    while unsafe { ptrace_peek(pid, state_addr)? } < STATE_STOP {
-        // SAFETY: the pid is a thread being traced, which is in ptrace-stop
-        unsafe {
-            ptrace_restart(PTRACE_SINGLESTEP, pid, &stop)?;
+    while unsafe { ptrace_peek(&tracee, state_addr)? } < STATE_STOP {
+        if let StoppedState::SingleStep(addr) = tracee.stop {
+            write_data(&data_fd, addr)?;
         }
-        if let StopState::SingleStep(addr) = stop {
-            write_data(data_fd, addr)?;
-        }
-        // SAFETY: the pid is a thread being traced
-        unsafe {
-            wait_for_stop(pid, &mut stop)?;
-        }
+        tracee = wait_for_stop(ptrace_restart(tracee, PTRACE_SINGLESTEP)?)?;
     }
 
     // Release the thread.
-    // SAFETY: the pid is a thread being traced, which is in ptrace-stop
-    unsafe {
-        ptrace_restart(PTRACE_DETACH, pid, &stop)?;
-    }
+    ptrace_restart(tracee, PTRACE_DETACH)?;
 
     Ok(())
 }
 
-unsafe fn ptrace_peek(pid: pid_t, addr: c_ulong) -> Result<c_ulong, c_int> {
+unsafe fn ptrace_peek(tracee: &StoppedTracee, addr: c_ulong) -> Result<c_ulong, c_int> {
+    let pid = tracee.pid;
     let mut data = MaybeUninit::uninit();
     // SAFETY: the pid is a thread being traced, which is in ptrace-stop
     // SAFETY: the address is to a pinned value, and the thread owning it
@@ -150,6 +154,9 @@ unsafe fn ptrace_peek(pid: pid_t, addr: c_ulong) -> Result<c_ulong, c_int> {
     Ok(unsafe { data.assume_init() })
 }
 
+/// # Safety
+///
+/// The pid must be a thread being traced, which is in ptrace-stop.
 unsafe fn ptrace_getsiginfo(pid: pid_t) -> Result<siginfo_t, c_int> {
     let mut siginfo = MaybeUninit::uninit();
     // SAFETY: the pid is a thread being traced, which is in ptrace-stop
@@ -161,86 +168,101 @@ unsafe fn ptrace_getsiginfo(pid: pid_t) -> Result<siginfo_t, c_int> {
     Ok(unsafe { siginfo.assume_init() })
 }
 
-unsafe fn ptrace_restart(request: c_uint, pid: pid_t, stop: &StopState) -> Result<(), c_int> {
+fn ptrace_restart(tracee: StoppedTracee, request: c_uint) -> Result<RunningTracee, c_int> {
     let request = if request == PTRACE_DETACH {
         PTRACE_DETACH
     } else {
-        match stop {
-            StopState::SyscallEnter => PTRACE_SYSCALL,
-            StopState::Group => PTRACE_LISTEN,
+        match tracee.stop {
+            StoppedState::SyscallEnter => PTRACE_SYSCALL,
+            StoppedState::Group => PTRACE_LISTEN,
             _ => request,
         }
     };
 
-    let sig = if let StopState::Signal(sig) = *stop {
+    let sig = if let StoppedState::Signal(sig) = tracee.stop {
         sig as c_ulong
     } else {
         0
     };
 
+    // assert!() cannot be used here, because it's not async-signal-safe
+    if !matches!(
+        request,
+        PTRACE_CONT | PTRACE_LISTEN | PTRACE_DETACH | PTRACE_SYSCALL | PTRACE_SINGLESTEP
+    ) {
+        return Err(EINVAL);
+    }
+
     // SAFETY: the pid is a thread being traced, which is in ptrace-stop
     // SAFETY: the signal is the one which entered the signal-delivery-stop
     unsafe {
-        sys_ptrace(request, pid, 0, sig)?;
+        sys_ptrace(request, tracee.pid, 0, sig)?;
     }
-    Ok(())
+    // SAFETY: the thread being traced is now running (request was a restart)
+    Ok(unsafe { tracee.restarted() })
 }
 
-#[derive(PartialEq, Eq, Debug)]
-enum StopState {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StoppedState {
     SyscallEnter,
     SyscallExit,
     Event,
     Group,
     Signal(c_int),
     SingleStep(usize),
-    Running,
 }
 
-impl StopState {
-    unsafe fn update(&mut self, status: c_int, pid: pid_t) -> Result<(), c_int> {
-        let sig = WSTOPSIG(status);
-        *self = if sig == SIGTRAP | 0x80 {
-            if *self == StopState::SyscallEnter {
-                StopState::SyscallExit
-            } else {
-                StopState::SyscallEnter
-            }
-        } else if sig == SIGTRAP {
-            if status >> 16 != 0 {
-                StopState::Event
-            } else {
-                // SAFETY: the target thread is in ptrace-stop
-                let siginfo = unsafe { ptrace_getsiginfo(pid)? };
-                if siginfo.si_code > 0 {
-                    // SAFETY: the stop signal is `SIGTRAP`, which has `si_addr`
-                    let addr = unsafe { siginfo.si_addr() };
-                    StopState::SingleStep(addr as usize)
-                } else {
-                    StopState::Signal(sig)
-                }
-            }
-        } else if status >> 16 == PTRACE_EVENT_STOP {
-            StopState::Group
+/// Determines the stopped state of the tracee.
+///
+/// # Safety
+///
+/// The pid must be a thread being traced, which is in ptrace-stop.
+unsafe fn stopped_state(
+    status: c_int,
+    pid: pid_t,
+    in_syscall: bool,
+) -> Result<StoppedState, c_int> {
+    let sig = WSTOPSIG(status);
+    let stop = if sig == SIGTRAP | 0x80 {
+        if in_syscall {
+            StoppedState::SyscallExit
         } else {
-            StopState::Signal(sig)
-        };
-        Ok(())
-    }
+            StoppedState::SyscallEnter
+        }
+    } else if sig == SIGTRAP {
+        if status >> 16 != 0 {
+            StoppedState::Event
+        } else {
+            // SAFETY: the target thread is in ptrace-stop
+            let siginfo = unsafe { ptrace_getsiginfo(pid)? };
+            if siginfo.si_code > 0 {
+                // SAFETY: the stop signal is `SIGTRAP`, which has `si_addr`
+                let addr = unsafe { siginfo.si_addr() };
+                StoppedState::SingleStep(addr as usize)
+            } else {
+                StoppedState::Signal(sig)
+            }
+        }
+    } else if status >> 16 == PTRACE_EVENT_STOP {
+        StoppedState::Group
+    } else {
+        StoppedState::Signal(sig)
+    };
+    Ok(stop)
 }
 
-unsafe fn wait_for_stop(pid: pid_t, stop: &mut StopState) -> Result<(), c_int> {
+fn wait_for_stop(tracee: RunningTracee) -> Result<StoppedTracee, c_int> {
     let mut status = 0;
     loop {
         // SAFETY: `waitpid()` is async-signal-safe
         // SAFETY: the pid is a thread being traced; the status pointer is valid
-        let ret = unsafe { waitpid(pid, &raw mut status, __WALL) };
+        let ret = unsafe { waitpid(tracee.pid, &raw mut status, __WALL) };
         if ret < 0 {
             let err = errno();
             if err != EINTR {
                 return Err(err);
             }
-        } else if ret == pid {
+        } else if ret == tracee.pid {
             break;
         } else {
             return Err(ECHILD);
@@ -249,10 +271,9 @@ unsafe fn wait_for_stop(pid: pid_t, stop: &mut StopState) -> Result<(), c_int> {
 
     if WIFSTOPPED(status) {
         // SAFETY: the pid is a thread being traced, which is in ptrace-stop
-        unsafe {
-            stop.update(status, pid)?;
-        }
-        Ok(())
+        let stop = unsafe { stopped_state(status, tracee.pid, tracee.in_syscall)? };
+        // SAFETY: the thread being traced is in ptrace-stop
+        Ok(unsafe { tracee.stopped(stop) })
     } else {
         Err(ECHILD)
     }
