@@ -130,7 +130,6 @@ impl Instruction {
 /// few extra instructions necessary to start the trace, copy the result, and stop the trace.
 ///
 /// See the top-level crate documentation for examples.
-#[inline]
 pub fn count_instructions<F, T, C>(f: F, counter: C) -> std::io::Result<T>
 where
     F: FnOnce() -> T,

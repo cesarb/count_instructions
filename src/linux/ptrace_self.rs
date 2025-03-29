@@ -1,10 +1,12 @@
 // Code in this file should be treated as #![no_std]; it should only use core and libc,
 // and must only use async-signal-safe functions or raw system calls.
 
+#[allow(clippy::wildcard_imports)]
+use libc::*;
+
 use super::Address;
 use super::fd::RawOwnedFd;
 use core::mem::MaybeUninit;
-use libc::*;
 use std::os::fd::AsRawFd;
 
 pub const STATE_INIT: c_ulong = 0;
@@ -77,6 +79,7 @@ unsafe fn sys_ptrace(
 
 // This function runs in a forked child of a multithreaded program, so only
 // async-signal-safe functions from libc or raw system calls can be used here.
+#[allow(clippy::needless_pass_by_value)]
 pub unsafe fn trace(
     pid: pid_t,
     state_addr: c_ulong,
@@ -279,6 +282,7 @@ fn wait_for_stop(tracee: RunningTracee) -> Result<StoppedTracee, c_int> {
     }
 }
 
+#[allow(clippy::cast_sign_loss)]
 fn retry_pipe_on_intr<F>(mut f: F, len: usize) -> Result<(), c_int>
 where
     F: FnMut() -> ssize_t,
@@ -299,6 +303,7 @@ where
 }
 
 /// Waits for and reads one byte on the ready pipe, and closes it.
+#[allow(clippy::needless_pass_by_value)]
 fn wait_for_set_ptracer(ready_fd: RawOwnedFd) -> Result<(), c_int> {
     let mut buf: [u8; 1] = [0];
     let len = buf.len();
@@ -312,6 +317,7 @@ fn wait_for_set_ptracer(ready_fd: RawOwnedFd) -> Result<(), c_int> {
 }
 
 /// Writes one byte to the control pipe, and closes it.
+#[allow(clippy::needless_pass_by_value)]
 fn write_control(control_fd: RawOwnedFd) -> Result<(), c_int> {
     let buf: [u8; 1] = [0];
     let len = buf.len();
