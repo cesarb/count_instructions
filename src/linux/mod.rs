@@ -1,10 +1,9 @@
 use std::os::fd::AsRawFd;
-use std::panic;
+use std::panic::resume_unwind;
 use std::sync::Mutex;
 use std::thread;
 
 use core::cmp::Ordering;
-use core::hint::black_box;
 use core::mem::{drop, forget, size_of};
 use core::pin::pin;
 use core::ptr::{from_ref, write_volatile};
@@ -25,11 +24,10 @@ use ptrace_self::{STATE_COUNT, STATE_INIT, STATE_READY, STATE_STOP, TraceToken, 
 
 static TRACE_MUTEX: Mutex<TraceToken> = Mutex::new(TraceToken);
 
-pub fn count_instructions<F, T, C>(f: F, mut counter: C) -> std::io::Result<T>
-where
-    F: FnOnce() -> T,
-    C: FnMut(&Instruction) + Send,
-{
+pub fn count_instructions(
+    f: &mut dyn FnMut(),
+    counter: &mut (dyn FnMut(&Instruction) + Send),
+) -> std::io::Result<()> {
     let mut state = pin!(STATE_INIT);
     let state_addr = from_ref(state.as_ref().get_ref()) as libc::c_ulong;
     // SAFETY: the result of casting a reference to a pointer is valid and properly aligned.
@@ -149,15 +147,12 @@ where
         retry_on_intr(|| read(control_read, &mut [0]))?;
 
         write_state(STATE_COUNT);
-        let f = black_box(f);
-        let result = f();
-        let result = black_box(result);
+        f();
         write_state(STATE_STOP);
 
         match helper.join() {
-            Ok(Ok(())) => Ok(result),
-            Ok(Err(err)) => Err(err),
-            Err(e) => panic::resume_unwind(e),
+            Ok(result) => result,
+            Err(e) => resume_unwind(e),
         }
     })
 }
@@ -186,7 +181,7 @@ impl Drop for PidGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::*;
 
     #[test]
     fn example() {

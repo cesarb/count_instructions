@@ -96,6 +96,8 @@
 
 extern crate std;
 
+use std::hint::black_box;
+
 #[cfg(target_os = "linux")]
 mod linux;
 
@@ -130,23 +132,33 @@ impl Instruction {
 /// few extra instructions necessary to start the trace, copy the result, and stop the trace.
 ///
 /// See the top-level crate documentation for examples.
-pub fn count_instructions<F, T, C>(f: F, counter: C) -> std::io::Result<T>
+pub fn count_instructions<F, T, C>(f: F, mut counter: C) -> std::io::Result<T>
 where
     F: FnOnce() -> T,
     C: FnMut(&Instruction) + Send,
 {
-    count_instructions_impl(f, counter)
+    let mut function = Some(f);
+    let mut result = None;
+
+    count_instructions_impl(
+        &mut || {
+            let f = black_box(function.take().unwrap());
+            result = Some(black_box(f()));
+        },
+        &mut counter,
+    )?;
+
+    Ok(result.unwrap())
 }
 
 #[cfg(target_os = "linux")]
 use linux::count_instructions as count_instructions_impl;
 
 #[cfg(not(target_os = "linux"))]
-fn count_instructions_impl<F, T, C>(_f: F, _counter: C) -> std::io::Result<T>
-where
-    F: FnOnce() -> T,
-    C: FnMut(&Instruction) + Send,
-{
+fn count_instructions_impl(
+    _f: &mut dyn FnMut(),
+    _counter: &mut (dyn FnMut(&Instruction) + Send),
+) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "instruction tracing not implemented for this platform",
