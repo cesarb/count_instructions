@@ -91,7 +91,7 @@ pub unsafe fn trace(
     wait_for_set_ptracer(ready_fd)?;
 
     // SAFETY: the pid is for a thread in the parent process of the fork,
-    // and in the unlikely case it isn't, the `read()` below will detect
+    // and in the unlikely case it isn't, the `write()` below will detect
     // it before anything else is done with the target thread.
     unsafe {
         sys_ptrace(PTRACE_SEIZE, pid, 0, PTRACE_O_TRACESYSGOOD as c_ulong)?;
