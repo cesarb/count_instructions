@@ -136,10 +136,7 @@ pub fn count_instructions(
             if pid.wait()?.exit_status() == Some(0) {
                 Ok(())
             } else {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "error in tracer",
-                ))
+                Err(std::io::Error::other("error in tracer"))
             }
         })?;
 
