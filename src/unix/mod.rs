@@ -15,6 +15,7 @@ use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus, kill_pro
 use super::{Address, Instruction};
 
 mod fd;
+mod signal_safe;
 
 #[cfg_attr(target_os = "linux", path = "ptrace_self_linux.rs")]
 mod ptrace_self;

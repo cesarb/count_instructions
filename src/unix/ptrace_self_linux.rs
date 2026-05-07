@@ -4,10 +4,9 @@
 #[allow(clippy::wildcard_imports)]
 use libc::*;
 
-use super::Address;
 use super::fd::RawOwnedFd;
+use super::signal_safe::{errno, wait_for_ready, write_control, write_data};
 use core::mem::MaybeUninit;
-use std::os::fd::AsRawFd;
 
 pub const STATE_INIT: c_ulong = 0;
 pub const STATE_READY: c_ulong = 1;
@@ -56,13 +55,6 @@ impl StoppedTracee {
     }
 }
 
-#[inline]
-fn errno() -> c_int {
-    // SAFETY: reading errno is async-signal-safe
-    // SAFETY: __errno_location() always points to this thread's errno
-    unsafe { *__errno_location() }
-}
-
 unsafe fn sys_ptrace(
     request: c_uint,
     pid: pid_t,
@@ -89,7 +81,7 @@ pub unsafe fn trace(
     ready_fd: RawOwnedFd,
     _token: &mut TraceToken,
 ) -> Result<(), c_int> {
-    wait_for_set_ptracer(ready_fd)?;
+    wait_for_ready(ready_fd)?;
 
     // SAFETY: the pid is for a thread in the parent process of the fork,
     // and in the unlikely case it isn't, the `write()` below will detect
@@ -281,65 +273,4 @@ fn wait_for_stop(tracee: RunningTracee) -> Result<StoppedTracee, c_int> {
     } else {
         Err(ECHILD)
     }
-}
-
-#[allow(clippy::cast_sign_loss)]
-fn retry_pipe_on_intr<F>(mut f: F, len: usize) -> Result<(), c_int>
-where
-    F: FnMut() -> ssize_t,
-{
-    loop {
-        let ret = f();
-        if ret < 0 {
-            let err = errno();
-            if err != EINTR {
-                break Err(err);
-            }
-        } else if ret as usize == len {
-            break Ok(());
-        } else {
-            break Err(EPIPE);
-        }
-    }
-}
-
-/// Waits for and reads one byte on the ready pipe, and closes it.
-#[allow(clippy::needless_pass_by_value)]
-fn wait_for_set_ptracer(ready_fd: RawOwnedFd) -> Result<(), c_int> {
-    let mut buf: [u8; 1] = [0];
-    let len = buf.len();
-    retry_pipe_on_intr(
-        // SAFETY: `read()` is async-signal-safe
-        // SAFETY: the `fd` is a valid open file descriptor
-        // SAFETY: the buffer is mutable and has `len` bytes
-        || unsafe { read(ready_fd.as_raw_fd(), (&raw mut buf).cast(), len) },
-        len,
-    )
-}
-
-/// Writes one byte to the control pipe, and closes it.
-#[allow(clippy::needless_pass_by_value)]
-fn write_control(control_fd: RawOwnedFd) -> Result<(), c_int> {
-    let buf: [u8; 1] = [0];
-    let len = buf.len();
-    retry_pipe_on_intr(
-        // SAFETY: `write()` is async-signal-safe
-        // SAFETY: the `fd` is a valid open file descriptor
-        // SAFETY: the buffer is readable and has `len` bytes
-        || unsafe { write(control_fd.as_raw_fd(), (&raw const buf).cast(), len) },
-        len,
-    )
-}
-
-/// Writes one address to the data pipe.
-fn write_data(data_fd: &RawOwnedFd, address: Address) -> Result<(), c_int> {
-    let buf = address.to_ne_bytes();
-    let len = buf.len();
-    retry_pipe_on_intr(
-        // SAFETY: `write()` is async-signal-safe
-        // SAFETY: the `fd` is a valid open file descriptor
-        // SAFETY: the buffer is readable and has `len` bytes
-        || unsafe { write(data_fd.as_raw_fd(), (&raw const buf).cast(), len) },
-        len,
-    )
 }
