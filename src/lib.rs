@@ -99,7 +99,7 @@ extern crate std;
 use std::hint::black_box;
 
 #[cfg(target_os = "linux")]
-mod linux;
+mod unix;
 
 /// Represents the address of a machine instruction.
 pub type Address = usize;
@@ -152,7 +152,7 @@ where
 }
 
 #[cfg(target_os = "linux")]
-use linux::count_instructions as count_instructions_impl;
+use unix::count_instructions as count_instructions_impl;
 
 #[cfg(not(target_os = "linux"))]
 fn count_instructions_impl(
