@@ -10,9 +10,7 @@ use core::ptr::{from_ref, write_volatile};
 
 use rustix::io::{read, retry_on_intr, write};
 use rustix::pipe::{PipeFlags, pipe_with};
-use rustix::process::{
-    PTracer, Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus, kill_process, set_ptracer, waitid,
-};
+use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus, kill_process, waitid};
 
 use super::{Address, Instruction};
 
@@ -53,9 +51,9 @@ pub fn count_instructions(
     let control_read = &control_read;
 
     thread::scope(|s| {
-        // SAFETY: gettid() is safe
-        let traced_tid = unsafe { libc::gettid() };
-        assert!(traced_tid > 0);
+        let traced_pid = getpid();
+        let traced_tid = gettid();
+        assert!(traced_pid > 0 && traced_tid > 0);
 
         let helper = thread::Builder::new().spawn_scoped(s, move || {
             let mut guard = TRACE_MUTEX.lock().unwrap();
@@ -83,6 +81,7 @@ pub fn count_instructions(
                         unsafe {
                             libc::_exit(
                                 match trace(
+                                    traced_pid,
                                     traced_tid,
                                     state_addr,
                                     control_write,
@@ -110,15 +109,19 @@ pub fn count_instructions(
             drop(ready_read);
 
             // Necessary when "restricted ptrace" mode is enabled.
-            set_ptracer(PTracer::ProcessID(pid.get()))?;
+            set_ptracer(pid.get())?;
             retry_on_intr(|| write(&ready_write, &[0]))?;
             drop(ready_write);
 
             // Wait for child PTRACE_SEIZE call before releasing the mutex.
             let mut buf = [0; size_of::<Address>()];
             let size = retry_on_intr(|| read(&data_read, &mut buf))?;
-            drop(guard);
             assert_eq!(size, buf.len());
+            if cfg!(target_os = "linux") {
+                // On Linux, multiple threads can be traced independently,
+                // so the mutex can be released early.
+                drop(guard);
+            }
 
             loop {
                 let size = retry_on_intr(|| read(&data_read, &mut buf))?;
@@ -174,6 +177,21 @@ impl Drop for PidGuard {
         let _ = kill_process(self.0, Signal::KILL);
         let _ = waitid(WaitId::Pid(self.0), WaitIdOptions::EXITED);
     }
+}
+
+fn getpid() -> libc::pid_t {
+    // SAFETY: getpid() is safe
+    unsafe { libc::getpid() }
+}
+
+fn gettid() -> libc::pid_t {
+    // SAFETY: gettid() is safe
+    unsafe { libc::gettid() }
+}
+
+fn set_ptracer(pid: Pid) -> rustix::io::Result<()> {
+    use rustix::process::{PTracer, set_ptracer};
+    set_ptracer(PTracer::ProcessID(pid))
 }
 
 #[cfg(test)]

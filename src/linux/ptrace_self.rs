@@ -81,6 +81,7 @@ unsafe fn sys_ptrace(
 // async-signal-safe functions from libc or raw system calls can be used here.
 #[allow(clippy::needless_pass_by_value)]
 pub unsafe fn trace(
+    _tgid: pid_t,
     pid: pid_t,
     state_addr: c_ulong,
     control_fd: RawOwnedFd,
