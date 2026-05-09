@@ -8,6 +8,20 @@ use super::fd::RawOwnedFd;
 use super::signal_safe::{errno, wait_for_ready, write_control, write_data};
 use core::mem::MaybeUninit;
 
+pub trait IntoAtomic {
+    type AtomicType;
+}
+
+impl IntoAtomic for u32 {
+    type AtomicType = core::sync::atomic::AtomicU32;
+}
+
+impl IntoAtomic for u64 {
+    type AtomicType = core::sync::atomic::AtomicU64;
+}
+
+pub type AtomicState = <c_ulong as IntoAtomic>::AtomicType;
+
 pub const STATE_INIT: c_ulong = 0;
 pub const STATE_READY: c_ulong = 1;
 pub const STATE_COUNT: c_ulong = 2;
@@ -75,7 +89,7 @@ unsafe fn sys_ptrace(
 pub unsafe fn trace(
     _tgid: pid_t,
     pid: pid_t,
-    state_addr: c_ulong,
+    state_addr: *const c_ulong,
     control_fd: RawOwnedFd,
     data_fd: RawOwnedFd,
     ready_fd: RawOwnedFd,
@@ -136,7 +150,7 @@ pub unsafe fn trace(
     Ok(())
 }
 
-unsafe fn ptrace_peek(tracee: &StoppedTracee, addr: c_ulong) -> Result<c_ulong, c_int> {
+unsafe fn ptrace_peek(tracee: &StoppedTracee, addr: *const c_ulong) -> Result<c_ulong, c_int> {
     let pid = tracee.pid;
     let mut data = MaybeUninit::uninit();
     // SAFETY: the pid is a thread being traced, which is in ptrace-stop
@@ -144,7 +158,12 @@ unsafe fn ptrace_peek(tracee: &StoppedTracee, addr: c_ulong) -> Result<c_ulong, 
     // will send SIGKILL to this process before dropping the pinned value
     // SAFETY: the data pointer points to enough space for an unsigned long
     unsafe {
-        sys_ptrace(PTRACE_PEEKDATA, pid, addr, data.as_mut_ptr() as c_ulong)?;
+        sys_ptrace(
+            PTRACE_PEEKDATA,
+            pid,
+            addr as c_ulong,
+            data.as_mut_ptr() as c_ulong,
+        )?;
     }
     // SAFETY: PTRACE_PEEKDATA writes a c_ulong to the data pointer
     Ok(unsafe { data.assume_init() })

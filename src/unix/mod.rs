@@ -5,8 +5,7 @@ use std::thread;
 
 use core::cmp::Ordering;
 use core::mem::{drop, forget, size_of};
-use core::pin::pin;
-use core::ptr::{from_ref, write_volatile};
+use core::sync::atomic::Ordering::SeqCst;
 
 use rustix::io::{read, retry_on_intr, write};
 use rustix::pipe::{PipeFlags, pipe_with};
@@ -21,7 +20,9 @@ mod signal_safe;
 mod ptrace_self;
 
 use fd::RawOwnedFd;
-use ptrace_self::{STATE_COUNT, STATE_INIT, STATE_READY, STATE_STOP, TraceToken, trace};
+use ptrace_self::{
+    AtomicState, STATE_COUNT, STATE_INIT, STATE_READY, STATE_STOP, TraceToken, trace,
+};
 
 static TRACE_MUTEX: Mutex<TraceToken> = Mutex::new(TraceToken);
 
@@ -29,11 +30,8 @@ pub fn count_instructions(
     f: &mut dyn FnMut(),
     counter: &mut (dyn FnMut(&Instruction) + Send),
 ) -> std::io::Result<()> {
-    let mut state = pin!(STATE_INIT);
-    let state_addr = from_ref(state.as_ref().get_ref()) as libc::c_ulong;
-    // SAFETY: the result of casting a reference to a pointer is valid and properly aligned.
-    // SAFETY: the tracer will only read this value while this thread is in a stopped state.
-    let mut write_state = |data| unsafe { write_volatile(state.as_mut().get_mut(), data) };
+    let state = &AtomicState::new(STATE_INIT);
+    let write_state = |data| state.store(data, SeqCst);
 
     let (control_read, control_write) = pipe_with(PipeFlags::CLOEXEC)?;
     let (data_read, data_write) = pipe_with(PipeFlags::CLOEXEC)?;
@@ -86,7 +84,7 @@ pub fn count_instructions(
                                 match trace(
                                     traced_pid,
                                     traced_tid,
-                                    state_addr,
+                                    state.as_ptr().cast_const(),
                                     control_write,
                                     data_write,
                                     ready_read,
