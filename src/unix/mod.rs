@@ -175,7 +175,7 @@ impl PidGuard {
 
 impl Drop for PidGuard {
     fn drop(&mut self) {
-        let _ = kill_process(self.0, Signal::KILL);
+        let _ = kill_process(self.0, Signal::TERM);
         let _ = waitid(WaitId::Pid(self.0), WaitIdOptions::EXITED);
     }
 }

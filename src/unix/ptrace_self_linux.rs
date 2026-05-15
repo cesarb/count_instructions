@@ -95,6 +95,14 @@ pub unsafe fn trace(
     ready_fd: RawOwnedFd,
     _token: &mut TraceToken,
 ) -> Result<(), c_int> {
+    // SAFETY: setting signal handlers to default is safe
+    unsafe {
+        // In the unlikely case the parent sent SIGTERM before this line,
+        // the `write()` below will detect it and exit this process.
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGCHLD, SIG_DFL);
+    }
+
     wait_for_ready(ready_fd)?;
 
     // SAFETY: the pid is for a thread in the parent process of the fork,
