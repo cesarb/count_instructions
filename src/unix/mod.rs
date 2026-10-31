@@ -192,7 +192,10 @@ fn gettid() -> libc::pid_t {
 
 fn set_ptracer(pid: Pid) -> rustix::io::Result<()> {
     use rustix::process::{PTracer, set_ptracer};
-    set_ptracer(PTracer::ProcessID(pid))
+    match set_ptracer(PTracer::ProcessID(pid.get())) {
+        Err(e) if e == rustix::io::Errno::INVAL => {}
+        r => r,
+    }
 }
 
 #[cfg(test)]
