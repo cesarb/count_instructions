@@ -91,7 +91,9 @@ pub fn count_instructions(
                                     &mut guard,
                                 ) {
                                     Ok(()) => libc::EXIT_SUCCESS,
-                                    Err(_) => libc::EXIT_FAILURE,
+                                    // Report the error number through the exit status.
+                                    Err(err @ 1..=255) => err,
+                                    Err(_) => libc::EIO,
                                 },
                             );
                         }
@@ -115,32 +117,35 @@ pub fn count_instructions(
             drop(ready_write);
 
             // Wait for child PTRACE_SEIZE call before releasing the mutex.
+            // If the child fails before that, the pipe is closed without any data.
             let mut buf = [0; size_of::<Address>()];
             let size = retry_on_intr(|| read(&data_read, &mut buf))?;
-            assert_eq!(size, buf.len());
-            if cfg!(target_os = "linux") {
-                // On Linux, multiple threads can be traced independently,
-                // so the mutex can be released early.
-                drop(guard);
-            }
-
-            loop {
-                let size = retry_on_intr(|| read(&data_read, &mut buf))?;
-                if size == 0 {
-                    break;
-                }
+            if size != 0 {
                 assert_eq!(size, buf.len());
+                if cfg!(target_os = "linux") {
+                    // On Linux, multiple threads can be traced independently,
+                    // so the mutex can be released early.
+                    drop(guard);
+                }
 
-                let address = Address::from_ne_bytes(buf);
-                let instruction = Instruction::new(address);
-                counter(&instruction);
+                loop {
+                    let size = retry_on_intr(|| read(&data_read, &mut buf))?;
+                    if size == 0 {
+                        break;
+                    }
+                    assert_eq!(size, buf.len());
+
+                    let address = Address::from_ne_bytes(buf);
+                    let instruction = Instruction::new(address);
+                    counter(&instruction);
+                }
             }
             drop(data_read);
 
-            if pid.wait()?.exit_status() == Some(0) {
-                Ok(())
-            } else {
-                Err(std::io::Error::other("error in tracer"))
+            match pid.wait()?.exit_status() {
+                Some(0) => Ok(()),
+                Some(err) => Err(std::io::Error::from_raw_os_error(err)),
+                None => Err(std::io::Error::other("error in tracer")),
             }
         })?;
 
@@ -201,6 +206,13 @@ mod tests {
 
     #[test]
     fn example() {
+        if let Err(e) = count_instructions(|| (), |_| ()) {
+            if e.kind() == std::io::ErrorKind::Unsupported {
+                std::eprintln!("skipping test, single-stepping is not supported: {e}");
+                return;
+            }
+        }
+
         #[inline(never)]
         fn add(left: usize, right: usize) -> usize {
             left + right

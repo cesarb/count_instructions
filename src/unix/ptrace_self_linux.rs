@@ -105,6 +105,11 @@ pub unsafe fn trace(
 
     wait_for_ready(ready_fd)?;
 
+    // Some architectures silently ignore PTRACE_SINGLESTEP (for instance, LoongArch without
+    // available hardware breakpoints), which would make the target thread run until it blocks
+    // forever. Check that single-stepping works before attaching to the target thread.
+    check_single_step()?;
+
     // SAFETY: the pid is for a thread in the parent process of the fork,
     // and in the unlikely case it isn't, the `write()` below will detect
     // it before anything else is done with the target thread.
@@ -158,23 +163,134 @@ pub unsafe fn trace(
     Ok(())
 }
 
-unsafe fn ptrace_peek(tracee: &StoppedTracee, addr: *const c_ulong) -> Result<c_ulong, c_int> {
-    let pid = tracee.pid;
+/// Checks that `PTRACE_SINGLESTEP` stops the tracee after a single instruction,
+/// by single-stepping a short-lived child process.
+///
+/// Returns `ENOSYS` if single-stepping is not supported.
+fn check_single_step() -> Result<(), c_int> {
+    // SAFETY: this process is single-threaded, and the child only
+    // uses async-signal-safe functions or raw system calls
+    let pid = unsafe { fork() };
+    if pid < 0 {
+        return Err(errno());
+    }
+    if pid == 0 {
+        // SAFETY: only async-signal-safe functions and raw system calls are used
+        unsafe {
+            // Do not linger if this process dies while the child is stopped.
+            if prctl(PR_SET_PDEATHSIG, SIGKILL as c_ulong) < 0
+                || sys_ptrace(PTRACE_TRACEME, 0, 0, 0).is_err()
+            {
+                _exit(EXIT_FAILURE);
+            }
+            kill(getpid(), SIGSTOP);
+            // If single-stepping does not work, the child gets here and exits.
+            _exit(EXIT_SUCCESS);
+        }
+    }
+
+    let result = single_step_child(pid);
+
+    // SAFETY: the pid is a child of this process which has not been reaped yet
+    unsafe {
+        kill(pid, SIGKILL);
+    }
+    let mut status = 0;
+    while waitpid_retry(pid, &mut status).is_ok() && WIFSTOPPED(status) {}
+
+    result
+}
+
+fn single_step_child(pid: pid_t) -> Result<(), c_int> {
+    let mut status = 0;
+    waitpid_retry(pid, &mut status)?;
+    if !WIFSTOPPED(status) || WSTOPSIG(status) != SIGSTOP {
+        return Err(ECHILD);
+    }
+
+    // SAFETY: the pid is a child being traced, which is in signal-delivery-stop;
+    // the SIGSTOP is suppressed by restarting it with a zero signal
+    if let Err(err) = unsafe { sys_ptrace(PTRACE_SINGLESTEP, pid, 0, 0) } {
+        // EIO means the architecture does not implement PTRACE_SINGLESTEP.
+        return Err(if err == EIO { ENOSYS } else { err });
+    }
+
+    waitpid_retry(pid, &mut status)?;
+    if WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP {
+        Ok(())
+    } else {
+        Err(ENOSYS)
+    }
+}
+
+/// Calls `waitpid()` for the given pid, retrying on `EINTR`.
+fn waitpid_retry(pid: pid_t, status: &mut c_int) -> Result<(), c_int> {
+    loop {
+        // SAFETY: `waitpid()` is async-signal-safe; the status pointer is valid
+        let ret = unsafe { waitpid(pid, status, __WALL) };
+        if ret == pid {
+            return Ok(());
+        } else if ret >= 0 {
+            return Err(ECHILD);
+        }
+        let err = errno();
+        if err != EINTR {
+            return Err(err);
+        }
+    }
+}
+
+/// Reads an unsigned long from the tracee using `PTRACE_PEEKDATA` or `PTRACE_PEEKUSER`.
+///
+/// # Safety
+///
+/// The pid must be a thread being traced, which is in ptrace-stop, and the
+/// address must be valid for the request.
+unsafe fn ptrace_peek_raw(request: c_uint, pid: pid_t, addr: c_ulong) -> Result<c_ulong, c_int> {
     let mut data = MaybeUninit::uninit();
+    // SAFETY: the pid is a thread being traced, which is in ptrace-stop
+    // SAFETY: the address is valid for this request
+    // SAFETY: the data pointer points to enough space for an unsigned long
+    unsafe {
+        sys_ptrace(request, pid, addr, data.as_mut_ptr() as c_ulong)?;
+    }
+    // SAFETY: PTRACE_PEEKDATA and PTRACE_PEEKUSER write a c_ulong to the data pointer
+    Ok(unsafe { data.assume_init() })
+}
+
+unsafe fn ptrace_peek(tracee: &StoppedTracee, addr: *const c_ulong) -> Result<c_ulong, c_int> {
     // SAFETY: the pid is a thread being traced, which is in ptrace-stop
     // SAFETY: the address is to a pinned value, and the thread owning it
     // will send SIGKILL to this process before dropping the pinned value
-    // SAFETY: the data pointer points to enough space for an unsigned long
-    unsafe {
-        sys_ptrace(
-            PTRACE_PEEKDATA,
-            pid,
-            addr as c_ulong,
-            data.as_mut_ptr() as c_ulong,
-        )?;
-    }
-    // SAFETY: PTRACE_PEEKDATA writes a c_ulong to the data pointer
-    Ok(unsafe { data.assume_init() })
+    unsafe { ptrace_peek_raw(PTRACE_PEEKDATA, tracee.pid, addr as c_ulong) }
+}
+
+/// Returns the address of the next instruction after a single-step trap.
+///
+/// # Safety
+///
+/// The pid must be a thread being traced, which is in ptrace-stop after a single-step trap.
+#[cfg(not(target_arch = "loongarch64"))]
+unsafe fn single_step_address(_pid: pid_t, siginfo: &siginfo_t) -> Result<usize, c_int> {
+    // SAFETY: the stop signal is `SIGTRAP`, which has `si_addr`
+    Ok(unsafe { siginfo.si_addr() } as usize)
+}
+
+/// Returns the address of the next instruction after a single-step trap.
+///
+/// LoongArch emulates single-stepping with a hardware breakpoint, and reports it with
+/// `SI_KERNEL` and no address, so the program counter has to be read instead.
+///
+/// # Safety
+///
+/// The pid must be a thread being traced, which is in ptrace-stop after a single-step trap.
+#[cfg(target_arch = "loongarch64")]
+unsafe fn single_step_address(pid: pid_t, _siginfo: &siginfo_t) -> Result<usize, c_int> {
+    // Offset of the program counter (`csr_era`) for PTRACE_PEEKUSER, from <asm/ptrace.h>.
+    const PC: c_ulong = 33;
+    // SAFETY: the pid is a thread being traced, which is in ptrace-stop
+    // SAFETY: PC is a valid offset for PTRACE_PEEKUSER on LoongArch
+    Ok(unsafe { ptrace_peek_raw(PTRACE_PEEKUSER, pid, PC)? } as usize)
 }
 
 /// # Safety
@@ -259,9 +375,8 @@ unsafe fn stopped_state(
             // SAFETY: the target thread is in ptrace-stop
             let siginfo = unsafe { ptrace_getsiginfo(pid)? };
             if siginfo.si_code > 0 {
-                // SAFETY: the stop signal is `SIGTRAP`, which has `si_addr`
-                let addr = unsafe { siginfo.si_addr() };
-                StoppedState::SingleStep(addr as usize)
+                // SAFETY: the target thread is in ptrace-stop after a single-step trap
+                StoppedState::SingleStep(unsafe { single_step_address(pid, &siginfo)? })
             } else {
                 StoppedState::Signal(sig)
             }
@@ -276,21 +391,7 @@ unsafe fn stopped_state(
 
 fn wait_for_stop(tracee: RunningTracee) -> Result<StoppedTracee, c_int> {
     let mut status = 0;
-    loop {
-        // SAFETY: `waitpid()` is async-signal-safe
-        // SAFETY: the pid is a thread being traced; the status pointer is valid
-        let ret = unsafe { waitpid(tracee.pid, &raw mut status, __WALL) };
-        if ret < 0 {
-            let err = errno();
-            if err != EINTR {
-                return Err(err);
-            }
-        } else if ret == tracee.pid {
-            break;
-        } else {
-            return Err(ECHILD);
-        }
-    }
+    waitpid_retry(tracee.pid, &mut status)?;
 
     if WIFSTOPPED(status) {
         // SAFETY: the pid is a thread being traced, which is in ptrace-stop
