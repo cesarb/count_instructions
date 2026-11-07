@@ -24,6 +24,7 @@
 //! ```
 //! # #[cfg(target_os = "linux")]
 //! # {
+//! # if count_instructions::count_instructions(|| (), |_| ()).is_err_and(|e| e.kind() == std::io::ErrorKind::Unsupported) { return Ok(()); }
 //! use count_instructions::count_instructions;
 //!
 //! # #[inline(never)]
@@ -44,6 +45,7 @@
 //! ```
 //! # #[cfg(target_os = "linux")]
 //! # {
+//! # if count_instructions::count_instructions(|| (), |_| ()).is_err_and(|e| e.kind() == std::io::ErrorKind::Unsupported) { return Ok(()); }
 //! use count_instructions::count_instructions;
 //!
 //! # #[inline(never)]
@@ -68,6 +70,7 @@
 //! ```
 //! # #[cfg(target_os = "linux")]
 //! # {
+//! # if count_instructions::count_instructions(|| (), |_| ()).is_err_and(|e| e.kind() == std::io::ErrorKind::Unsupported) { return Ok(()); }
 //! use count_instructions::count_instructions;
 //! use count_instructions::Address;
 //!
