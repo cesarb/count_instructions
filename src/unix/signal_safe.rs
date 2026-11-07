@@ -7,11 +7,30 @@ use libc::*;
 use super::{Address, RawOwnedFd};
 use std::os::fd::AsRawFd;
 
+#[cfg(target_os = "freebsd")]
+#[inline]
+pub fn errno() -> c_int {
+    // SAFETY: reading errno is async-signal-safe
+    // SAFETY: __error() always points to this thread's errno
+    unsafe { *__error() }
+}
+
+#[cfg(target_os = "linux")]
 #[inline]
 pub fn errno() -> c_int {
     // SAFETY: reading errno is async-signal-safe
     // SAFETY: __errno_location() always points to this thread's errno
     unsafe { *__errno_location() }
+}
+
+#[cfg(target_os = "freebsd")]
+#[inline]
+pub fn set_errno(error: c_int) {
+    // SAFETY: writing errno is async-signal-safe
+    // SAFETY: __error() always points to this thread's errno
+    unsafe {
+        *__error() = error;
+    }
 }
 
 #[allow(clippy::cast_sign_loss)]

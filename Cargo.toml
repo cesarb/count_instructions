@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.85.0"
 authors = ["Cesar Eduardo Barros <cesarb@cesarb.eti.br>"]
 description = "Counts the instructions executed within a single function"
-repository = "https://github.com/cesarb/count_instructions"
+repository = "https://codeberg.org/cesarb/count_instructions"
 license = "MIT OR Apache-2.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -7,17 +7,18 @@ use libc::*;
 use super::fd::RawOwnedFd;
 use super::signal_safe::{errno, wait_for_ready, write_control, write_data};
 use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicU32, AtomicU64};
 
 pub trait IntoAtomic {
     type AtomicType;
 }
 
 impl IntoAtomic for u32 {
-    type AtomicType = core::sync::atomic::AtomicU32;
+    type AtomicType = AtomicU32;
 }
 
 impl IntoAtomic for u64 {
-    type AtomicType = core::sync::atomic::AtomicU64;
+    type AtomicType = AtomicU64;
 }
 
 pub type AtomicState = <c_ulong as IntoAtomic>::AtomicType;

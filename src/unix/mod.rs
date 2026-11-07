@@ -53,7 +53,7 @@ pub fn count_instructions(
 
     thread::scope(|s| {
         let traced_pid = getpid();
-        let traced_tid = gettid();
+        let traced_tid = gettid()?;
         assert!(traced_pid > 0 && traced_tid > 0);
 
         let helper = thread::Builder::new().spawn_scoped(s, move || {
@@ -110,7 +110,7 @@ pub fn count_instructions(
             drop(ready_read);
 
             // Necessary when "restricted ptrace" mode is enabled.
-            set_ptracer(pid.get())?;
+            set_ptracer(pid.get());
             retry_on_intr(|| write(&ready_write, &[0]))?;
             drop(ready_write);
 
@@ -180,19 +180,39 @@ impl Drop for PidGuard {
     }
 }
 
+#[inline]
 fn getpid() -> libc::pid_t {
     // SAFETY: getpid() is safe
     unsafe { libc::getpid() }
 }
 
-fn gettid() -> libc::pid_t {
-    // SAFETY: gettid() is safe
-    unsafe { libc::gettid() }
+#[cfg(target_os = "freebsd")]
+fn gettid() -> std::io::Result<libc::pid_t> {
+    let mut tid = 0;
+    // SAFETY: the address passed to thr_self() is valid
+    if unsafe { libc::thr_self(&raw mut tid) } < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(tid.try_into().unwrap())
+    }
 }
 
-fn set_ptracer(pid: Pid) -> rustix::io::Result<()> {
+#[cfg(target_os = "linux")]
+#[inline]
+fn gettid() -> std::io::Result<libc::pid_t> {
+    // SAFETY: gettid() is safe
+    Ok(unsafe { libc::gettid() })
+}
+
+#[cfg(not(target_os = "linux"))]
+#[inline]
+fn set_ptracer(_pid: Pid) {
+}
+
+#[cfg(target_os = "linux")]
+fn set_ptracer(pid: Pid) {
     use rustix::process::{PTracer, set_ptracer};
-    set_ptracer(PTracer::ProcessID(pid))
+    let _ = set_ptracer(PTracer::ProcessID(pid));
 }
 
 #[cfg(test)]
